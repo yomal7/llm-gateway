@@ -1,0 +1,5 @@
+/configs/config.yaml
+/data/
+*.db
+.env
+phase1-requirements-and-plan.md

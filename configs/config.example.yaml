@@ -1,0 +1,52 @@
+# Copy this to config.yaml and adjust. The Gemini API key itself is NOT
+# stored here — set it in the environment variable named below.
+#
+# NOTE on model `name` values: these should be the exact model ID
+# strings Gemini's API expects (e.g. the ones shown when you generate
+# code samples in AI Studio). The names below are placeholders based on
+# the model list in your rate-limit dashboard — double check the exact
+# API IDs before running against the real API, since I can't verify
+# the precise strings for these newer models from here.
+#
+# List order = failover priority. The gateway tries top to bottom.
+
+server:
+  port: 8080
+  default_strategy: queue   # queue | failover
+  default_queue_timeout_seconds: 30
+
+gemini:
+  base_url: https://generativelanguage.googleapis.com
+  api_key_env: GEMINI_API_KEY
+
+limits:
+  max_input_tokens: 30000
+  max_output_tokens: 8192
+
+storage:
+  sqlite_path: ./data/gateway.db
+
+models:
+  # Generous daily quota, decent per-minute headroom — good default.
+  - name: gemini-3.1-flash-lite
+    rpm: 15
+    tpm: 250000
+    rpd: 500
+
+  # Very high RPD but a small TPM ceiling — fine for short responses,
+  # bad for long-context requests.
+  - name: gemma-4-26b
+    rpm: 30
+    tpm: 16000
+    rpd: 14400
+
+  # Small RPM/RPD — last resort in this ordering, not a first choice.
+  - name: gemini-2.5-flash-lite
+    rpm: 10
+    tpm: 250000
+    rpd: 20
+
+  - name: gemini-2.5-flash
+    rpm: 5
+    tpm: 250000
+    rpd: 20
