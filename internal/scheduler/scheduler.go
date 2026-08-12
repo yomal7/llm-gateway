@@ -20,14 +20,9 @@ const (
 const minWaitFloor = 5 * time.Millisecond
 
 type Request struct {
-	Contents        []provider.Content
-	MaxOutputTokens int
-	Temperature     *float64
-
+	Body []byte
 	EstimatedTokens int
-
 	Strategy Strategy
-
 	Timeout time.Duration
 }
 
@@ -76,24 +71,10 @@ func New(p provider.Provider, models []limiter.Model, defaultStrategy Strategy, 
 	}
 }
 
-// EstimateInputTokens gives a rough pre-call token estimate for TPM
-// admission, using the common ~4-characters-per-token heuristic.
-// Gemini's TPM limit counts input tokens only, so output tokens are
-// deliberately not included here. This is a coarse estimate by
-// design — ReportActualUsage corrects the limiter's TPM bucket against
-// the real count as soon as a response comes back.
-func EstimateInputTokens(contents []provider.Content) int {
-	var chars int
-	for _, c := range contents {
-		chars += len(c.Text)
-	}
-	return chars/4 + 1
+func EstimateInputTokens(body []byte) int {
+	return len(body)/4 + 1
 }
 
-// Generate walks the priority list, admitting locally against each
-// model's limiter and calling the provider once admitted. It returns
-// as soon as a model succeeds, or an error once every model has been
-// exhausted or the context is done.
 func (s *Scheduler) Generate(ctx context.Context, req Request) (Result, error) {
 	strategy := req.Strategy
 	if strategy != StrategyQueue && strategy != StrategyFailover {
@@ -105,7 +86,7 @@ func (s *Scheduler) Generate(ctx context.Context, req Request) (Result, error) {
 	}
 	estimatedTokens := req.EstimatedTokens
 	if estimatedTokens <= 0 {
-		estimatedTokens = EstimateInputTokens(req.Contents)
+		estimatedTokens = EstimateInputTokens(req.Body)
 	}
 
 	var attempts []Attempt
@@ -113,8 +94,6 @@ func (s *Scheduler) Generate(ctx context.Context, req Request) (Result, error) {
 	for _, entry := range s.models {
 		admitted, reason, wait, err := s.admit(ctx, entry, estimatedTokens, strategy, timeout)
 		if err != nil {
-			// Context canceled or deadline exceeded — the caller gave
-			// up, so there's no point trying further models.
 			attempts = append(attempts, Attempt{Model: entry.name, Outcome: "rejected_locally", Err: err})
 			return Result{Attempts: attempts}, err
 		}
@@ -124,30 +103,21 @@ func (s *Scheduler) Generate(ctx context.Context, req Request) (Result, error) {
 		}
 
 		resp, callErr := s.provider.Generate(ctx, provider.GenerateRequest{
-			Model:           entry.name,
-			Contents:        req.Contents,
-			MaxOutputTokens: req.MaxOutputTokens,
-			Temperature:     req.Temperature,
+			Model: entry.name,
+			Body:  req.Body,
 		})
 		if callErr == nil {
-			// TPM only tracks input tokens (per Gemini's documented
-			// limits), so only correct against the real input count.
 			entry.limiter.ReportActualUsage(estimatedTokens, resp.Usage.InputTokens)
 			attempts = append(attempts, Attempt{Model: entry.name, Outcome: "success"})
 			return Result{Response: resp, ModelUsed: entry.name, Attempts: attempts}, nil
 		}
 
-		// A real call was made and failed. Never release the local
-		// reservation here — see limiter.Release's doc comment for why.
 		var provErr *provider.Error
 		if errors.As(callErr, &provErr) && provErr.Retryable() {
 			attempts = append(attempts, Attempt{Model: entry.name, Outcome: "provider_error", Reason: provErr.Kind.String(), Err: callErr})
-			continue // always fail over on a retryable provider error
+			continue
 		}
 
-		// Non-retryable (bad request, auth, or a non-provider error
-		// like a network failure) — stop immediately, failing over
-		// won't fix it.
 		attempts = append(attempts, Attempt{Model: entry.name, Outcome: "provider_error", Err: callErr})
 		return Result{Attempts: attempts}, callErr
 	}
