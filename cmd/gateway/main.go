@@ -1,7 +1,3 @@
-// Command gateway is the entrypoint for the LLM gateway. At this stage
-// (M0/M1) it loads config, sets up logging, constructs the Gemini
-// client, and serves a health endpoint. The Gateway API routes and
-// scheduler land in M3-M5.
 package main
 
 import (
@@ -10,9 +6,13 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"time"
 
+	geminiapi "github.com/yomal7/llm-gateway/internal/api/gemini"
 	"github.com/yomal7/llm-gateway/internal/config"
+	"github.com/yomal7/llm-gateway/internal/limiter"
 	"github.com/yomal7/llm-gateway/internal/provider/gemini"
+	"github.com/yomal7/llm-gateway/internal/scheduler"
 )
 
 func main() {
@@ -32,10 +32,19 @@ func main() {
 		"default_strategy", cfg.Server.DefaultStrategy,
 	)
 
-	// Constructed here so startup fails fast on obvious misconfiguration.
-	// Not wired to any route yet — the scheduler (M3) and API adapters
-	// (M4/M5) are what will actually call Generate().
-	_ = gemini.New(cfg.Gemini.BaseURL, cfg.APIKey())
+	geminiClient := gemini.New(cfg.Gemini.BaseURL, cfg.APIKey())
+
+	limiterModels := make([]limiter.Model, len(cfg.Models))
+	for i, m := range cfg.Models {
+		limiterModels[i] = limiter.Model{Name: m.Name, RPM: m.RPM, TPM: m.TPM, RPD: m.RPD}
+	}
+
+	sched := scheduler.New(
+		geminiClient,
+		limiterModels,
+		scheduler.Strategy(cfg.Server.DefaultStrategy),
+		time.Duration(cfg.Server.DefaultQueueTimeoutSeconds)*time.Second,
+	)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -43,6 +52,7 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, `{"status":"ok","models_configured":%d}`, len(cfg.Models))
 	})
+	geminiapi.RegisterRoutes(mux, sched)
 
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	slog.Info("gateway listening", "addr", addr)
