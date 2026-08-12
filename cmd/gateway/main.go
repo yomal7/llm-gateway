@@ -10,6 +10,7 @@ import (
 
 	geminiapi "github.com/yomal7/llm-gateway/internal/api/gemini"
 	"github.com/yomal7/llm-gateway/internal/config"
+	"github.com/yomal7/llm-gateway/internal/httplog"
 	"github.com/yomal7/llm-gateway/internal/limiter"
 	"github.com/yomal7/llm-gateway/internal/provider/gemini"
 	"github.com/yomal7/llm-gateway/internal/scheduler"
@@ -56,7 +57,7 @@ func main() {
 
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	slog.Info("gateway listening", "addr", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := http.ListenAndServe(addr, httplog.Middleware(mux)); err != nil {
 		slog.Error("server stopped", "error", err)
 		os.Exit(1)
 	}
