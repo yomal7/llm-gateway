@@ -1,8 +1,3 @@
-// Package gemini implements provider.Provider against Google's Gemini
-// API. The request path mirrors Gemini's real REST shape
-// (/v1beta/models/{model}:generateContent) on purpose: code already
-// written against the official Gemini SDK/REST API can point at this
-// gateway just by swapping the base URL.
 package gemini
 
 import (
@@ -38,81 +33,9 @@ func New(baseURL, apiKey string) *Client {
 
 func (c *Client) Name() string { return "gemini" }
 
-// --- wire types: these mirror Gemini's actual REST request/response shapes ---
-
-type geminiPart struct {
-	Text string `json:"text"`
-}
-
-type geminiContent struct {
-	Role  string       `json:"role,omitempty"`
-	Parts []geminiPart `json:"parts"`
-}
-
-type generationConfig struct {
-	MaxOutputTokens int      `json:"maxOutputTokens,omitempty"`
-	Temperature     *float64 `json:"temperature,omitempty"`
-}
-
-type generateContentRequest struct {
-	Contents         []geminiContent  `json:"contents"`
-	GenerationConfig generationConfig `json:"generationConfig,omitempty"`
-}
-
-type usageMetadata struct {
-	PromptTokenCount     int `json:"promptTokenCount"`
-	CandidatesTokenCount int `json:"candidatesTokenCount"`
-	TotalTokenCount      int `json:"totalTokenCount"`
-}
-
-type candidate struct {
-	Content geminiContent `json:"content"`
-}
-
-type generateContentResponse struct {
-	Candidates    []candidate   `json:"candidates"`
-	UsageMetadata usageMetadata `json:"usageMetadata"`
-}
-
-// errorDetail models one entry of Gemini's error.details array. On
-// RESOURCE_EXHAUSTED (429) responses this is where the retryDelay
-// google.rpc.RetryInfo detail lives — the same field visible in the
-// 429 errors from your triage-tool logs.
-type errorDetail struct {
-	Type       string `json:"@type"`
-	RetryDelay string `json:"retryDelay"`
-}
-
-type errorBody struct {
-	Error struct {
-		Code    int           `json:"code"`
-		Message string        `json:"message"`
-		Status  string        `json:"status"`
-		Details []errorDetail `json:"details"`
-	} `json:"error"`
-}
-
 func (c *Client) Generate(ctx context.Context, req provider.GenerateRequest) (provider.GenerateResponse, error) {
-	body := generateContentRequest{
-		GenerationConfig: generationConfig{
-			MaxOutputTokens: req.MaxOutputTokens,
-			Temperature:     req.Temperature,
-		},
-	}
-	for _, content := range req.Contents {
-		body.Contents = append(body.Contents, geminiContent{
-			Role:  content.Role,
-			Parts: []geminiPart{{Text: content.Text}},
-		})
-	}
-
-	payload, err := json.Marshal(body)
-	if err != nil {
-		return provider.GenerateResponse{}, fmt.Errorf("marshaling gemini request: %w", err)
-	}
-
 	url := fmt.Sprintf("%s/v1beta/models/%s:generateContent?key=%s", c.baseURL, req.Model, c.apiKey)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(req.Body))
 	if err != nil {
 		return provider.GenerateResponse{}, fmt.Errorf("building gemini request: %w", err)
 	}
@@ -133,31 +56,43 @@ func (c *Client) Generate(ctx context.Context, req provider.GenerateRequest) (pr
 		return provider.GenerateResponse{}, classifyError(resp.StatusCode, respBody)
 	}
 
-	var parsed generateContentResponse
-	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		return provider.GenerateResponse{}, fmt.Errorf("parsing gemini response: %w", err)
-	}
-
-	var text strings.Builder
-	if len(parsed.Candidates) > 0 {
-		for _, part := range parsed.Candidates[0].Content.Parts {
-			text.WriteString(part.Text)
-		}
-	}
-
 	return provider.GenerateResponse{
-		Text:      text.String(),
+		Body:      respBody,
 		ModelUsed: req.Model,
-		Usage: provider.Usage{
-			InputTokens:  parsed.UsageMetadata.PromptTokenCount,
-			OutputTokens: parsed.UsageMetadata.CandidatesTokenCount,
-		},
+		Usage:     extractUsage(respBody),
 	}, nil
 }
 
-// classifyError turns Gemini's HTTP status and error body into a
-// provider.Error, extracting the RetryInfo delay when Google supplies
-// one so the scheduler can back off intelligently instead of guessing.
+func extractUsage(body []byte) provider.Usage {
+	var parsed struct {
+		UsageMetadata struct {
+			PromptTokenCount     int `json:"promptTokenCount"`
+			CandidatesTokenCount int `json:"candidatesTokenCount"`
+		} `json:"usageMetadata"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return provider.Usage{}
+	}
+	return provider.Usage{
+		InputTokens:  parsed.UsageMetadata.PromptTokenCount,
+		OutputTokens: parsed.UsageMetadata.CandidatesTokenCount,
+	}
+}
+
+type errorDetail struct {
+	Type       string `json:"@type"`
+	RetryDelay string `json:"retryDelay"`
+}
+
+type errorBody struct {
+	Error struct {
+		Code    int           `json:"code"`
+		Message string        `json:"message"`
+		Status  string        `json:"status"`
+		Details []errorDetail `json:"details"`
+	} `json:"error"`
+}
+
 func classifyError(statusCode int, body []byte) *provider.Error {
 	var parsed errorBody
 	message := string(body)
