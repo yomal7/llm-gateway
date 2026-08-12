@@ -30,6 +30,7 @@ const (
 	ErrKindUnavailable
 	ErrKindInvalidRequest
 	ErrKindAuth
+	ErrKindNotFound
 )
 
 func (k ErrorKind) String() string {
@@ -42,6 +43,8 @@ func (k ErrorKind) String() string {
 		return "invalid_request"
 	case ErrKindAuth:
 		return "auth"
+	case ErrKindNotFound:
+		return "not_found"
 	default:
 		return "unknown"
 	}
@@ -62,7 +65,7 @@ func (e *Error) Error() string {
 }
 
 func (e *Error) Retryable() bool {
-	return e.Kind == ErrKindRateLimited || e.Kind == ErrKindUnavailable
+	return e.Kind == ErrKindRateLimited || e.Kind == ErrKindUnavailable || e.Kind == ErrKindNotFound
 }
 
 type Provider interface {

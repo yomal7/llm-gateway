@@ -113,6 +113,8 @@ func classifyError(statusCode int, body []byte) *provider.Error {
 	switch statusCode {
 	case http.StatusTooManyRequests:
 		kind = provider.ErrKindRateLimited
+	case http.StatusNotFound:
+		kind = provider.ErrKindNotFound
 	case http.StatusServiceUnavailable:
 		kind = provider.ErrKindUnavailable
 	case http.StatusBadRequest:

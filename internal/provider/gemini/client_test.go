@@ -118,6 +118,27 @@ func TestGenerate_ServiceUnavailable(t *testing.T) {
 	}
 }
 
+func TestGenerate_ModelNotFoundIsRetryable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error": {"code": 404, "message": "models/gemma-4-26b is not found for API version v1beta, or is not supported for generateContent."}}`))
+	}))
+	defer server.Close()
+
+	client := New(server.URL, "test-key")
+	_, err := client.Generate(context.Background(), provider.GenerateRequest{Model: "gemma-4-26b", Body: []byte(`{}`)})
+	provErr, ok := err.(*provider.Error)
+	if !ok {
+		t.Fatalf("expected *provider.Error, got %T", err)
+	}
+	if provErr.Kind != provider.ErrKindNotFound {
+		t.Errorf("kind = %v, want ErrKindNotFound", provErr.Kind)
+	}
+	if !provErr.Retryable() {
+		t.Error("expected a model-not-found error to be retryable (scheduler should try the next model)")
+	}
+}
+
 func TestGenerate_InvalidRequestIsNotRetryable(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)

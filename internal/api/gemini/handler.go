@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/yomal7/llm-gateway/internal/provider"
 	"github.com/yomal7/llm-gateway/internal/scheduler"
@@ -43,19 +45,66 @@ func RegisterRoutes(mux *http.ServeMux, sched *scheduler.Scheduler) {
 			return
 		}
 
-		result, err := sched.Generate(r.Context(), scheduler.Request{
+		start := time.Now()
+		result, genErr := sched.Generate(r.Context(), scheduler.Request{
 			Body:     body,
 			Strategy: strategy,
 		})
-		if err != nil {
-			writeSchedulerError(w, err)
+
+		status := http.StatusOK
+		respMessage := ""
+		if genErr != nil {
+			status, respMessage = schedulerErrorStatus(genErr)
+		}
+		logGenerateAttempt(start, strategy, status, result, genErr)
+
+		if genErr != nil {
+			writeError(w, status, respMessage, "")
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Gateway-Model-Used", result.ModelUsed)
-		_, _ = w.Write(result.Response.Body)
+		_, _ = w.Write(result.Response.Body) // forward the provider's response verbatim
 	})
+}
+
+func logGenerateAttempt(start time.Time, strategy scheduler.Strategy, status int, result scheduler.Result, genErr error) {
+	strategyLabel := string(strategy)
+	if strategyLabel == "" {
+		strategyLabel = "default"
+	}
+
+	attrs := []any{
+		"status", status,
+		"model_used", result.ModelUsed,
+		"strategy", strategyLabel,
+		"attempts", attemptSummaries(result.Attempts),
+		"duration_ms", time.Since(start).Milliseconds(),
+	}
+
+	if genErr != nil {
+		slog.Warn("generate_content", append(attrs, "error", genErr.Error())...)
+		return
+	}
+	slog.Info("generate_content", attrs...)
+}
+
+func attemptSummaries(attempts []scheduler.Attempt) []string {
+	out := make([]string, len(attempts))
+	for i, a := range attempts {
+		switch {
+		case a.Outcome == "success":
+			out[i] = a.Model + ":success"
+		case a.Reason != "":
+			out[i] = a.Model + ":" + a.Outcome + ":" + a.Reason
+		case a.Err != nil:
+			out[i] = a.Model + ":" + a.Outcome + ":" + a.Err.Error()
+		default:
+			out[i] = a.Model + ":" + a.Outcome
+		}
+	}
+	return out
 }
 
 func parseStrategy(header string) (scheduler.Strategy, bool) {
@@ -81,11 +130,10 @@ func writeError(w http.ResponseWriter, status int, message, statusText string) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-func writeSchedulerError(w http.ResponseWriter, err error) {
+func schedulerErrorStatus(err error) (status int, message string) {
 	var provErr *provider.Error
 	if errors.As(err, &provErr) {
-		writeError(w, provErr.StatusCode, provErr.Message, "")
-		return
+		return provErr.StatusCode, provErr.Message
 	}
-	writeError(w, http.StatusServiceUnavailable, err.Error(), "UNAVAILABLE")
+	return http.StatusServiceUnavailable, err.Error()
 }

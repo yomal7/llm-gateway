@@ -119,6 +119,28 @@ func TestGenerate_FailsOverOnRetryableProviderError(t *testing.T) {
 	}
 }
 
+func TestGenerate_FailsOverOnModelNotFound(t *testing.T) {
+	// Regression test for a real failure: a misconfigured or
+	// decommissioned model name in the priority list must not sink
+	// the whole request when a working model is next in line.
+	fp := newFakeProvider()
+	fp.responses["a"] = func(req provider.GenerateRequest) (provider.GenerateResponse, error) {
+		return provider.GenerateResponse{}, &provider.Error{Kind: provider.ErrKindNotFound, StatusCode: 404, Message: "models/a is not found"}
+	}
+	sched := New(fp, []limiter.Model{generousModel("a"), generousModel("b")}, StrategyQueue, time.Second)
+
+	result, err := sched.Generate(context.Background(), req())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.ModelUsed != "b" {
+		t.Errorf("ModelUsed = %q, want %q (a 404 on model a should fail over to model b)", result.ModelUsed, "b")
+	}
+	if calls := fp.modelsCalled(); len(calls) != 2 || calls[0] != "a" || calls[1] != "b" {
+		t.Errorf("calls = %v, want [a b]", calls)
+	}
+}
+
 func TestGenerate_NonRetryableProviderErrorStopsImmediately(t *testing.T) {
 	fp := newFakeProvider()
 	fp.responses["a"] = func(req provider.GenerateRequest) (provider.GenerateResponse, error) {
@@ -192,7 +214,7 @@ func TestGenerate_QueueModeGivesUpBeforeExceedingTimeoutAndFailsOver(t *testing.
 	modelA := limiter.Model{Name: "a", RPM: 1, TPM: 1_000_000, RPD: 100}
 	sched := New(fp, []limiter.Model{modelA, generousModel("b")}, StrategyQueue, 50*time.Millisecond)
 
-	sched.models[0].limiter.TryAdmit(1) // exhaust model a's single slot
+	sched.models[0].limiter.TryAdmit(1)
 
 	start := time.Now()
 	result, err := sched.Generate(context.Background(), req())
